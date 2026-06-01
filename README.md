@@ -178,12 +178,10 @@ For configuring IPv6 in areas that are on native dual-stack, please see the disc
 ## Usage
 
 ```
-usage: eap_proxy [-h] [--ping-gateway] [--ping-ip PING_IP]
-                 [--ignore-when-wan-up] [--ignore-start] [--ignore-logoff]
-                 [--restart-dhcp] [--set-mac] [--vlan-id VLAN_ID] [--daemon]
-                 [--pidfile PIDFILE] [--syslog] [--run-as USER[:GROUP]]
-                 [--promiscuous] [--debug] [--debug-packets]
-                 IF_WAN IF_ROUTER
+usage: eap_proxy [-h] [--wan-udp HOST:PORT] [--wan-udp-recv-port PORT] [--wan-udp-listen-ip IP] [--rtr-udp HOST:PORT] [--rtr-udp-recv-port PORT] [--rtr-udp-listen-ip IP]
+                 [--wan-interface INTERFACE] [--rtr-interface INTERFACE] [--ping-gateway] [--ping-ip PING_IP] [--ignore-when-wan-up] [--ignore-start] [--ignore-logoff] [--restart-dhcp]
+                 [--set-mac] [--vlan-id VLAN_ID] [--daemon] [--pidfile PIDFILE] [--syslog] [--run-as USER[:GROUP]] [--promiscuous] [--debug] [--debug-packets]
+                 [IF_WAN] [IF_ROUTER]
 
 positional arguments:
   IF_WAN                interface of the AT&T ONT/WAN
@@ -192,42 +190,46 @@ positional arguments:
 optional arguments:
   -h, --help            show this help message and exit
 
+UDP configuration:
+  --wan-udp HOST:PORT   send WAN packets via UDP to HOST:PORT instead of using IF_WAN interface
+  --wan-udp-recv-port PORT
+                        receive WAN UDP packets on local PORT (default: same as remote port)
+  --wan-udp-listen-ip IP
+                        listen on specific local IP for WAN UDP (default: all interfaces)
+  --rtr-udp HOST:PORT   send router packets via UDP to HOST:PORT instead of using IF_ROUTER interface
+  --rtr-udp-recv-port PORT
+                        receive router UDP packets on local PORT (default: same as remote port)
+  --rtr-udp-listen-ip IP
+                        listen on specific local IP for router UDP (default: all interfaces)
+  --wan-interface INTERFACE
+                        WAN interface name (alternative to positional IF_WAN argument)
+  --rtr-interface INTERFACE
+                        router interface name (alternative to positional IF_ROUTER argument)
+
 checking whether WAN is up:
-  --ping-gateway        normally the WAN is considered up if the IF_WAN VLAN
-                        has an address; this option additionally requires that
-                        there is a route via IF_WAN with a gateway (next-hop)
-                        that responds to a ping
-  --ping-ip PING_IP     normally the WAN is considered up if the IF_WAN VLAN
-                        has an address; this option additionally requires that
-                        PING_IP responds to a ping
+  --ping-gateway        normally the WAN is considered up if the IF_WAN VLAN has an address; this option additionally requires that there is a route via IF_WAN with a gateway (next-hop) that
+                        responds to a ping
+  --ping-ip PING_IP     normally the WAN is considered up if the IF_WAN VLAN has an address; this option additionally requires that PING_IP responds to a ping
 
 ignoring router packets:
-  --ignore-when-wan-up  ignore router packets when WAN is up (see --ping-
-                        gateway)
+  --ignore-when-wan-up  ignore router packets when WAN is up (see --ping-gateway)
   --ignore-start        always ignore EAPOL-Start from router
   --ignore-logoff       always ignore EAPOL-Logoff from router
 
 configuring IF_WAN VLAN:
-  --restart-dhcp        check whether WAN is up after receiving EAP-Success on
-                        IF_WAN VLAN (see --ping-gateway); if not, restart
-                        dhclient on IF_WAN VLAN
-  --set-mac             set IF_WAN VLAN MAC (ether) address to router's MAC
-                        address
+  --restart-dhcp        check whether WAN is up after receiving EAP-Success on IF_WAN VLAN (see --ping-gateway); if not, restart dhclient on IF_WAN VLAN
+  --set-mac             set IF_WAN VLAN MAC (ether) address to router's MAC address
   --vlan-id VLAN_ID     set IF_WAN VLAN ID (default is 0)
 
 process management:
-  --daemon              fork into background and attempt to run forever until
-                        killed; implies --syslog
+  --daemon              fork into background and attempt to run forever until killed; implies --syslog
   --pidfile PIDFILE     record pid to PIDFILE
   --syslog              log to syslog instead of stderr
   --run-as USER[:GROUP]
-                        switch to USER[:GROUP] after opening sockets;
-                        incompatible with --daemon
+                        switch to USER[:GROUP] after opening sockets; incompatible with --daemon
 
 debugging:
-  --promiscuous         place interfaces into promiscuous mode instead of
-                        multicast
+  --promiscuous         place interfaces into promiscuous mode instead of multicast
   --debug               enable debug-level logging
-  --debug-packets       print packets in hex format to assist with debugging;
-                        implies --debug
+  --debug-packets       print packets in hex format to assist with debugging; implies --debug
 ```

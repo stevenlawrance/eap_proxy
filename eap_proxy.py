@@ -1,15 +1,30 @@
 #!/usr/bin/env python
 """
-usage: eap_proxy [-h] [--ping-gateway] [--ping-ip PING_IP]
+usage: eap_proxy [-h] [--wan-udp HOST:PORT] [--wan-udp-recv-port PORT]
+                 [--wan-udp-listen-ip IP] [--rtr-udp HOST:PORT]
+                 [--rtr-udp-recv-port PORT] [--rtr-udp-listen-ip IP]
+                 [--ping-gateway] [--ping-ip PING_IP]
                  [--ignore-when-wan-up] [--ignore-start] [--ignore-logoff]
                  [--restart-dhcp] [--set-mac] [--vlan-id VLAN_ID] [--daemon]
                  [--pidfile PIDFILE] [--syslog] [--run-as USER[:GROUP]]
                  [--promiscuous] [--debug] [--debug-packets]
-                 IF_WAN IF_ROUTER
+                 [IF_WAN] [IF_ROUTER]
 
 positional arguments:
-  IF_WAN                interface of the AT&T ONT/WAN
-  IF_ROUTER             interface of the AT&T router
+  IF_WAN                interface of the AT&T ONT/WAN (optional if using --wan-udp)
+  IF_ROUTER             interface of the AT&T router (optional if using --rtr-udp)
+
+UDP configuration:
+  --wan-udp HOST:PORT   send WAN packets via UDP to HOST:PORT instead of using IF_WAN interface
+  --wan-udp-recv-port PORT
+                        receive WAN UDP packets on local PORT (default: same as remote port)
+  --wan-udp-listen-ip IP
+                        listen on specific local IP for WAN UDP (default: all interfaces)
+  --rtr-udp HOST:PORT   send router packets via UDP to HOST:PORT instead of using IF_ROUTER interface
+  --rtr-udp-recv-port PORT
+                        receive router UDP packets on local PORT (default: same as remote port)
+  --rtr-udp-listen-ip IP
+                        listen on specific local IP for router UDP (default: all interfaces)
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -157,9 +172,44 @@ def rawsocket(ifname, promisc=False):
     return s
 
 
+def udpsocket(listen_ip=None, listen_port=None):
+    """Return UDP socket for EAP packet forwarding.
+       Optionally bind to specific IP and port for receiving packets.
+    """
+    # Determine address family based on listen_ip
+    if listen_ip:
+        try:
+            socket.inet_pton(socket.AF_INET, listen_ip)
+            family = socket.AF_INET
+        except socket.error:
+            try:
+                socket.inet_pton(socket.AF_INET6, listen_ip)
+                family = socket.AF_INET6
+            except socket.error:
+                raise ValueError("Invalid IP address: %s" % listen_ip)
+    else:
+        family = socket.AF_INET  # Default to IPv4 if no specific IP
+
+    s = socket.socket(family, socket.SOCK_DGRAM)
+
+    if listen_port:
+        bind_addr = (listen_ip or ('::' if family == socket.AF_INET6 else '0.0.0.0'), listen_port)
+        s.bind(bind_addr)
+
+    return s
+
+
 def getifname(sock):
-    """Return interface name of `sock`"""
-    return sock.getsockname()[0]
+    """Return interface name of `sock` or UDP description"""
+    try:
+        return sock.getsockname()[0]  # Works for raw sockets
+    except (AttributeError, IndexError):
+        # For UDP sockets, return a descriptive name
+        try:
+            addr, port = sock.getsockname()[:2]
+            return "udp:%s:%d" % (addr, port)
+        except:
+            return "udp:unknown"
 
 
 def getifaddr(ifname):
@@ -588,8 +638,26 @@ class EAPProxy(object):
         self.args = args
         self.os = EdgeOS(log)
         self.log = log
-        self.s_rtr = rawsocket(args.if_rtr, promisc=args.promiscuous)
-        self.s_wan = rawsocket(args.if_wan, promisc=args.promiscuous)
+
+        # Initialize router side socket
+        if args.rtr_udp:
+            self.s_rtr = udpsocket(args.rtr_udp_listen_ip, args.rtr_udp_recv_port)
+            self.rtr_udp_target = (args.rtr_udp_host, args.rtr_udp_port)
+            self.rtr_is_udp = True
+        else:
+            self.s_rtr = rawsocket(args.if_rtr, promisc=args.promiscuous)
+            self.rtr_udp_target = None
+            self.rtr_is_udp = False
+
+        # Initialize WAN side socket
+        if args.wan_udp:
+            self.s_wan = udpsocket(args.wan_udp_listen_ip, args.wan_udp_recv_port)
+            self.wan_udp_target = (args.wan_udp_host, args.wan_udp_port)
+            self.wan_is_udp = True
+        else:
+            self.s_wan = rawsocket(args.if_wan, promisc=args.promiscuous)
+            self.wan_udp_target = None
+            self.wan_is_udp = False
 
     def proxy_loop(self):
         poll = select.poll()
@@ -610,7 +678,17 @@ class EAPProxy(object):
                 "[%s] unexpected poll event: %s (%d)" % (ifname, ename, event)
             )
 
-        buf = sock_in.recv(2048)
+        # Receive packet from UDP or raw socket
+        # Track source address for UDP packets to use in logging
+        source_addr = None
+        if sock_in == self.s_rtr and self.rtr_is_udp:
+            buf, source_addr = sock_in.recvfrom(2048)
+            log.debug("%s: received from %s:%d", ifname, source_addr[0], source_addr[1])
+        elif sock_in == self.s_wan and self.wan_is_udp:
+            buf, source_addr = sock_in.recvfrom(2048)
+            log.debug("%s: received from %s:%d", ifname, source_addr[0], source_addr[1])
+        else:
+            buf = sock_in.recv(2048)
 
         if self.args.debug_packets:
             log.debug("%s: recv %d bytes:\n%s", ifname, len(buf), strbuf(buf))
@@ -620,17 +698,38 @@ class EAPProxy(object):
 
         if sock_in == self.s_rtr:
             sock_out = self.s_wan
+            is_udp_out = self.wan_is_udp
+            udp_target = self.wan_udp_target
             self.on_router_eap(eap)
             if self.should_ignore_router_eap(eap):
                 log.debug("%s: ignoring %s", ifname, eap)
                 return
         else:
             sock_out = self.s_rtr
+            is_udp_out = self.rtr_is_udp
+            udp_target = self.rtr_udp_target
             self.on_wan_eap(eap)
 
-        log.info("%s: %s > %s", ifname, eap, getifname(sock_out))
-        nbytes = sock_out.send(buf)
-        log.debug("%s: sent %d bytes", getifname(sock_out), nbytes)
+        # Determine source and destination names for logging
+        # For UDP input, show the source IP:port instead of bind address
+        if source_addr:
+            source_name = "udp:%s:%d" % (source_addr[0], source_addr[1])
+        else:
+            source_name = ifname
+
+        if is_udp_out:
+            dest_name = "udp:%s:%d" % (udp_target[0], udp_target[1])
+        else:
+            dest_name = getifname(sock_out)
+
+        log.info("%s: %s > %s", source_name, eap, dest_name)
+
+        # Send packet via UDP or raw socket
+        if is_udp_out:
+            nbytes = sock_out.sendto(buf, udp_target)
+        else:
+            nbytes = sock_out.send(buf)
+        log.debug("%s: sent %d bytes", dest_name, nbytes)
 
     def should_ignore_router_eap(self, eap):
         args = self.args
@@ -644,8 +743,8 @@ class EAPProxy(object):
 
     def on_router_eap(self, eap):
         args = self.args
-        if not args.set_mac:
-            return
+        if not args.set_mac or self.wan_is_udp:
+            return  # Cannot set MAC when using UDP
 
         if_vlan = "%s.%d" % (args.if_wan, args.vlan_id)
         if self.os.getmac(if_vlan) == eap.src:
@@ -655,8 +754,8 @@ class EAPProxy(object):
         self.os.setmac(if_vlan, eap.src)
 
     def on_wan_eap(self, eap):
-        if not self.should_restart_dhcp(eap):
-            return
+        if not self.should_restart_dhcp(eap) or self.wan_is_udp:
+            return  # Cannot restart DHCP when using UDP
         args = self.args
         if_vlan = "%s.%d" % (args.if_wan, args.vlan_id)
         self.log.info("%s: restarting dhclient", if_vlan)
@@ -669,6 +768,14 @@ class EAPProxy(object):
 
     def check_wan_is_up(self):
         args, log = self.args, self.log
+
+        # When using UDP, we cannot check interface status
+        if self.wan_is_udp:
+            if args.ping_ip:
+                return self.ping_ipaddr(args.ping_ip)
+            # Assume UP if using UDP and no specific ping target
+            return True
+
         if_vlan = "%s.%d" % (args.if_wan, args.vlan_id)
         ipaddr = getifaddr(if_vlan)
         if ipaddr:
@@ -701,8 +808,55 @@ def parse_args():
     p = argparse.ArgumentParser("eap_proxy")
 
     # interface arguments
-    p.add_argument("if_wan", metavar="IF_WAN", help="interface of the AT&T ONT/WAN")
-    p.add_argument("if_rtr", metavar="IF_ROUTER", help="interface of the AT&T router")
+    p.add_argument("if_wan", metavar="IF_WAN", nargs='?', help="interface of the AT&T ONT/WAN")
+    p.add_argument("if_rtr", metavar="IF_ROUTER", nargs='?', help="interface of the AT&T router")
+
+    # UDP configuration options
+    g = p.add_argument_group("UDP configuration")
+    g.add_argument(
+        "--wan-udp",
+        metavar="HOST:PORT",
+        help="send WAN packets via UDP to HOST:PORT instead of using IF_WAN interface"
+    )
+    g.add_argument(
+        "--wan-udp-recv-port",
+        type=int,
+        metavar="PORT",
+        help="receive WAN UDP packets on local PORT (default: same as remote port)"
+    )
+    g.add_argument(
+        "--wan-udp-listen-ip",
+        metavar="IP",
+        help="listen on specific local IP for WAN UDP (default: all interfaces)"
+    )
+    g.add_argument(
+        "--rtr-udp",
+        metavar="HOST:PORT",
+        help="send router packets via UDP to HOST:PORT instead of using IF_ROUTER interface"
+    )
+    g.add_argument(
+        "--rtr-udp-recv-port",
+        type=int,
+        metavar="PORT",
+        help="receive router UDP packets on local PORT (default: same as remote port)"
+    )
+    g.add_argument(
+        "--rtr-udp-listen-ip",
+        metavar="IP",
+        help="listen on specific local IP for router UDP (default: all interfaces)"
+    )
+
+    # Explicit interface options (alternative to positional arguments)
+    g.add_argument(
+        "--wan-interface",
+        metavar="INTERFACE",
+        help="WAN interface name (alternative to positional IF_WAN argument)"
+    )
+    g.add_argument(
+        "--rtr-interface",
+        metavar="INTERFACE",
+        help="router interface name (alternative to positional IF_ROUTER argument)"
+    )
 
     # checking whether WAN is up
     g = p.add_argument_group("checking whether WAN is up")
@@ -788,6 +942,49 @@ def parse_args():
     )
 
     args = p.parse_args()
+
+    # Handle explicit interface options (override positional arguments)
+    if args.wan_interface:
+        if args.if_wan:
+            p.error("cannot specify both positional IF_WAN and --wan-interface")
+        args.if_wan = args.wan_interface
+
+    if args.rtr_interface:
+        if args.if_rtr:
+            p.error("cannot specify both positional IF_ROUTER and --rtr-interface")
+        args.if_rtr = args.rtr_interface
+
+    # Validate interface vs UDP configuration
+    if not args.if_wan and not args.wan_udp:
+        p.error("either IF_WAN interface (positional or --wan-interface) or --wan-udp must be specified")
+    if not args.if_rtr and not args.rtr_udp:
+        p.error("either IF_ROUTER interface (positional or --rtr-interface) or --rtr-udp must be specified")
+    if args.if_wan and args.wan_udp:
+        p.error("cannot specify both WAN interface and --wan-udp")
+    if args.if_rtr and args.rtr_udp:
+        p.error("cannot specify both router interface and --rtr-udp")
+
+    # Parse UDP host:port specifications
+    if args.wan_udp:
+        try:
+            host, port = args.wan_udp.rsplit(':', 1)
+            args.wan_udp_host = host
+            args.wan_udp_port = int(port)
+            if not args.wan_udp_recv_port:
+                args.wan_udp_recv_port = args.wan_udp_port
+        except ValueError:
+            p.error("--wan-udp must be in format HOST:PORT")
+
+    if args.rtr_udp:
+        try:
+            host, port = args.rtr_udp.rsplit(':', 1)
+            args.rtr_udp_host = host
+            args.rtr_udp_port = int(port)
+            if not args.rtr_udp_recv_port:
+                args.rtr_udp_recv_port = args.rtr_udp_port
+        except ValueError:
+            p.error("--rtr-udp must be in format HOST:PORT")
+
     if args.ping_gateway and args.ping_ip:
         p.error("--ping-gateway not allowed with --ping-ip")
     if args.run_as:

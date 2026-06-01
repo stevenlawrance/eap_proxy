@@ -2,9 +2,9 @@
 
 This fork of eap_proxy allows two separate systems, such as Raspberry Pis, to transport EAPOL packets between the ONT side of an AT&T fiber gateway and the actual AT&T ONT when both exist in different physical locations with the only connectivity between the two involving managed switches that block EAPOL packets, such as UniFi switches. By encapsulating EAPOL within UDP packets that can flow normally via managed switches, an AT&T fiber gateway and an AT&T ONT can exchange EAPOL packets despite traversing EAPOL-unfriendly managed switches by having eap_proxy instances on both sides encapsulating EAPOL within UDP.
 
-# The rest of this document are original from eap_proxy
+# The rest of this document is original from eap_proxy
 
-The following are from the original maintainer of eap_proxy.
+The following is from the original maintainer of eap_proxy.
 
 # End of Life
 
